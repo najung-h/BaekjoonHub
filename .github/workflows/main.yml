@@ -1,0 +1,120 @@
+name: Sync selected problems to study repo
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  sync-selected:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out personal repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set git identity
+        run: |
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+
+      - name: Clone study repo
+        env:
+          STUDY_PAT: ${{ secrets.STUDY_PAT }}
+        run: |
+          git clone --depth=1 "https://x-access-token:${STUDY_PAT}@github.com/13aek/algostudy.git"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Build changed-file list
+        run: |
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            git diff --name-only HEAD~20 > changed_files.txt || true
+          else
+            git diff --name-only "$BEFORE" "$AFTER" > changed_files.txt || true
+          fi
+          echo "Changed files:"; cat changed_files.txt || true
+
+      - name: Select & sync ONLY allowlisted problems (full scan, number or name)
+        run: |
+          python << 'PY'
+          import os, re, shutil, yaml, pathlib, sys
+
+          study_repo = "algostudy"
+          allow_path = os.path.join(study_repo, "_config", "study-allowlist.yml")
+          actor = os.environ.get("GITHUB_ACTOR", "")
+          dest_root = os.path.join(study_repo, "members", actor)
+
+          # 1) allowlist 로드
+          with open(allow_path, "r", encoding="utf-8") as f:
+            allow = yaml.safe_load(f) or {}
+          plat = allow.get("platforms", {}) or {}
+          boj_nums   = set(map(str, plat.get("boj",  [])))
+          swea_nums  = set(map(str, plat.get("swea", [])))
+          boj_names  = [str(x) for x in plat.get("boj_names",  [])]
+          swea_names = [str(x) for x in plat.get("swea_names", [])]
+
+          # 2) 후보 파일 전체 스캔 (BOJ/boj/백준/SWEA/swea 폴더만)
+          roots = ["BOJ", "boj", "백준", "SWEA", "swea"]
+          exts  = (".py", ".cpp", ".java", ".md", ".txt")
+          candidates = []
+          for root in roots:
+            if os.path.isdir(root):
+              for dp, _, fns in os.walk(root):
+                for fn in fns:
+                  if fn.endswith(exts):
+                    candidates.append(os.path.join(dp, fn))
+
+          # 3) 숫자/이름 매칭
+          num_token = re.compile(r'(?<!\d)(\d{2,6})(?!\d)')
+
+          def has_num(path):
+            nums = set(num_token.findall(path))
+            return bool(nums & boj_nums) or bool(nums & swea_nums)
+
+          def has_name(path):
+            # 언더스코어를 공백처럼 취급해 부분일치 강화
+            raw   = path
+            lower = raw.lower().replace("_", " ")
+            for kw in boj_names + swea_names:
+              if not kw: 
+                continue
+              if kw.lower() in lower or kw in raw:
+                return True
+            return False
+
+          selected = [p for p in candidates if has_num(p.replace("\\","/")) or has_name(p)]
+
+          print(f"ALLOW stats -> BOJ#:{len(boj_nums)} SWEA#:{len(swea_nums)} BOJname:{len(boj_names)} SWEAname:{len(swea_names)}")
+          print("CANDIDATES:", len(candidates))
+          for i, p in enumerate(selected, 1):
+            print(f"SELECTED[{i}]: {p}")
+
+          if not selected:
+            sys.exit(0)
+
+          pathlib.Path(dest_root).mkdir(parents=True, exist_ok=True)
+          for src in selected:
+            dst = os.path.join(dest_root, src)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+          PY
+
+      - name: Commit & Push to study repo (master)
+        working-directory: algostudy
+        run: |
+          git checkout -B master
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "sync(selected): ${{ github.actor }} from ${{ github.repository }}@${GITHUB_SHA::7}"
+            git push origin master
+          else
+            echo "No selected changes to sync."
+          fi
