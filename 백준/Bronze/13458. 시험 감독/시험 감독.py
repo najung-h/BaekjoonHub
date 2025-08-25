@@ -40,7 +40,7 @@ for room in people_in_each_exam_room_lst:
     for room in people_in_each_exam_room_lst:
         supervisor += room // C +1'''
 
-print(supervisor)
+print(supervisor) 
 
 
 '''gpt의 코드리뷰
